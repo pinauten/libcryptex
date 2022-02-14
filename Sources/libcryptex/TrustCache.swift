@@ -10,30 +10,68 @@ import Foundation
 import SwiftUtils
 import Security
 
-public func getCDHash(ofFile path: String) -> Data? {
+public func getCDHashes(ofFile path: String) -> [Data] {
     var staticCode: SecStaticCode?
     guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, .init(), &staticCode) == errSecSuccess else {
-        return nil
+        return []
     }
     
     var infos: CFDictionary?
     guard SecCodeCopySigningInformation(staticCode!, .init(), &infos) == errSecSuccess else {
-        return nil
+        return []
     }
     
     guard let sInfos = infos as? [String: Any] else {
-        return nil
+        return []
     }
     
-    guard let cdHashes = sInfos["cdhashes"] as? [Data] else {
-        return nil
+    func infoGetCDHashes(_ info: [String: Any]) -> [Data] {
+        guard let cdHashes = info["cdhashes"] as? [Data] else {
+            return []
+        }
+        
+        var result: [Data] = []
+        for hash in cdHashes {
+            if hash.count >= 20 {
+                result.append(hash)
+            }
+        }
+        
+        return result
     }
     
-    guard cdHashes.count >= 1 else {
-        return nil
+    if let format = sInfos["format"] as? String {
+        if format.starts(with: "Mach-O universal") {
+            func cdHashesForArch(_ arch: String) -> [Data] {
+                var staticCode: SecStaticCode?
+                guard SecStaticCodeCreateWithPathAndAttributes(URL(fileURLWithPath: path) as CFURL, .init(), [kSecCodeAttributeArchitecture: arch] as CFDictionary, &staticCode) == errSecSuccess else {
+                    return []
+                }
+                
+                var infos: CFDictionary?
+                guard SecCodeCopySigningInformation(staticCode!, .init(), &infos) == errSecSuccess else {
+                    return []
+                }
+                
+                guard let sInfos = infos as? [String: Any] else {
+                    return []
+                }
+                
+                return infoGetCDHashes(sInfos)
+            }
+            
+            var result: [Data] = []
+            
+            // arm64 and arm64e only for now
+            for arch in ["arm64", "arm64e"] {
+                result.append(contentsOf: cdHashesForArch(arch))
+            }
+            
+            return result
+        }
     }
     
-    return cdHashes[0]
+    return infoGetCDHashes(sInfos)
 }
 
 public func buildTrustCache(hashes: [Data], wrapInIM4P: Bool = false) -> Data {
@@ -138,7 +176,7 @@ public func buildTrustCache(fromPath cryptexPath: String, wrapInIM4P: Bool = fal
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
            !isDir.boolValue {
-            if let cdHash = getCDHash(ofFile: path) {
+            for cdHash in getCDHashes(ofFile: path) {
                 hashes.append(cdHash[..<20] + Data(fromObject: 2 as UInt16))
             }
         }
